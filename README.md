@@ -42,7 +42,6 @@ cw use                # interactive picker
 | `cw add <name>` | Create a new profile |
 | `cw remove <name>` | Delete a profile |
 | `cw login <name>` | Authenticate a profile (Claude Code login or API key) |
-| `cw set-key <name>` | Set or update an API key |
 | `cw use [name]` | Start Claude Code with a profile |
 | `cw alias` | Print shell aliases for direct access |
 

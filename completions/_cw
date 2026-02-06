@@ -8,7 +8,6 @@ _cw() {
         'add:Create a new profile'
         'remove:Delete a profile'
         'login:Log in with a profile'
-        'set-key:Set or update API key'
         'use:Start Claude Code with a profile'
         'alias:Print shell aliases'
         'help:Show help'
@@ -18,7 +17,7 @@ _cw() {
         _describe 'command' commands
     elif (( CURRENT == 3 )); then
         case "$words[2]" in
-            use|remove|rm|login|set-key|key)
+            use|remove|rm|login)
                 local -a profiles
                 profiles=(${(f)"$(cw --completions 2>/dev/null)"})
                 _describe 'profile' profiles

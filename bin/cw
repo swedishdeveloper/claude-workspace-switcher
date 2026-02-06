@@ -75,13 +75,10 @@ profile_exists() {
     [[ -d "$PROFILES_DIR/$1" ]] || die "Profile '$1' not found."
 }
 
-# Extract a JSON string value using sed (no python3 dependency).
-# Usage: json_val file key
 json_val() {
     sed -n 's/.*"'"$2"'"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$1" 2>/dev/null | head -1
 }
 
-# Check if a JSON boolean key is true.
 json_bool() {
     grep -q "\"$2\"[[:space:]]*:[[:space:]]*true" "$1" 2>/dev/null
 }
@@ -93,7 +90,6 @@ seed_config() {
     local cj="$PROFILES_DIR/$1/.claude.json"
     if [[ -f "$cj" ]]; then
         if ! json_bool "$cj" "hasCompletedOnboarding"; then
-            # Add the flag to existing config
             local tmp
             tmp=$(sed 's/^{/{\"hasCompletedOnboarding\":true,\"lastOnboardingVersion\":\"2.1.0\",/' "$cj")
             printf '%s' "$tmp" > "$cj"
@@ -104,7 +100,6 @@ seed_config() {
     chmod 600 "$cj"
 }
 
-# Get display info for a profile
 get_status() {
     local name="$1"
 
@@ -138,7 +133,6 @@ get_status() {
     echo -e "${D}not configured${N}"
 }
 
-# List profile names (used by completions and internally)
 list_profiles() {
     ensure_dir
     for d in "$PROFILES_DIR"/*/; do
@@ -248,9 +242,6 @@ cmd_login() {
 
 cmd_set_key() {
     local name="${1:-}"
-    [[ -n "$name" ]] || die "Usage: cw set-key <name>"
-    profile_exists "$name"
-
     read -rp "Open console.anthropic.com/settings/keys in your browser? [Y/n] " open_browser
     if [[ "${open_browser,,}" != "n" ]]; then
         open_url "https://console.anthropic.com/settings/keys"
@@ -365,13 +356,12 @@ $(echo -e "${B}Commands:${N}")
   add <name>         Create a new profile
   remove <name>      Delete a profile and its config
   login <name>       Log in or re-configure authentication
-  set-key <name>     Set or update an API key
   use [name]         Start Claude Code with a profile (interactive if no name)
   alias              Print shell aliases for direct access
 
 $(echo -e "${B}Examples:${N}")
   cw add work                  # Create a new profile
-  cw login work                # Log in via Claude Code's auth picker
+  cw login work                # Set up authentication
   cw use work                  # Start Claude Code with profile
   cw use                       # Interactive profile picker
 
@@ -396,7 +386,6 @@ case "$cmd" in
     add)                  cmd_add "$@" ;;
     remove|rm)            cmd_remove "$@" ;;
     login)                cmd_login "$@" ;;
-    set-key|key)          cmd_set_key "$@" ;;
     use|start)            cmd_use "$@" ;;
     alias|aliases)        cmd_alias "$@" ;;
     --completions)        cmd_completions ;;

@@ -5,7 +5,7 @@ _cw() {
     local cur prev commands
     cur="${COMP_WORDS[COMP_CWORD]}"
     prev="${COMP_WORDS[COMP_CWORD-1]}"
-    commands="list add remove login set-key use alias help"
+    commands="list add remove login use alias help"
 
     case "$COMP_CWORD" in
         1)
@@ -13,7 +13,7 @@ _cw() {
             ;;
         2)
             case "$prev" in
-                use|remove|rm|login|set-key|key)
+                use|remove|rm|login)
                     local profiles
                     profiles="$(cw --completions 2>/dev/null)"
                     COMPREPLY=($(compgen -W "$profiles" -- "$cur"))
