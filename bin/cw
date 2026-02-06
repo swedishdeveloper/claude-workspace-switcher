@@ -1,0 +1,406 @@
+#!/usr/bin/env bash
+#
+# cw — Claude Workspace Switcher
+#
+# Switch between Claude Code profiles (OAuth subscriptions or API keys).
+# Each profile is an isolated config directory under ~/.claude-profiles/.
+#
+# https://github.com/swedishdeveloper/claude-workspace-switcher
+
+set -euo pipefail
+
+CW_VERSION="1.0.0"
+PROFILES_DIR="${CW_PROFILES_DIR:-$HOME/.claude-profiles}"
+KEYFILE=".api-key"
+
+# ─── Colors ─────────────────────────────────────────────────────────────────────
+
+if [[ -t 1 ]]; then
+    R='\033[0;31m' G='\033[0;32m' Y='\033[1;33m'
+    C='\033[0;36m' B='\033[1m' D='\033[2m' N='\033[0m'
+else
+    R='' G='' Y='' C='' B='' D='' N=''
+fi
+
+# ─── Helpers ────────────────────────────────────────────────────────────────────
+
+die()  { echo -e "${R}Error: $1${N}" >&2; exit 1; }
+info() { echo -e "$1"; }
+
+ensure_dir() { mkdir -p "$PROFILES_DIR"; }
+
+has_key()  { [[ -f "$PROFILES_DIR/$1/$KEYFILE" ]]; }
+read_key() { tr -d '\n\r' < "$PROFILES_DIR/$1/$KEYFILE" 2>/dev/null; }
+
+open_url() {
+    local url="$1"
+    case "$(uname -s)" in
+        Darwin) open "$url" ;;
+        *)      xdg-open "$url" 2>/dev/null ;;
+    esac
+}
+
+keychain_svc() {
+    printf '%s' "$1" | shasum -a 256 | cut -c1-8
+}
+
+clear_oauth() {
+    local name="$1"
+    local config_dir="$PROFILES_DIR/$name"
+    local hash
+    hash="$(keychain_svc "$config_dir")"
+
+    if command -v security &>/dev/null; then
+        security delete-generic-password -s "Claude Code-credentials-$hash" &>/dev/null || true
+    fi
+
+    rm -f "$config_dir/.claude.json"
+}
+
+validate_key() {
+    local key="$1"
+    local http_code
+    http_code=$(curl -s -o /dev/null -w '%{http_code}' \
+        -H "x-api-key: $key" \
+        -H "anthropic-version: 2023-06-01" \
+        "https://api.anthropic.com/v1/models" 2>/dev/null) || true
+    case "$http_code" in
+        200) return 0 ;;
+        401) return 1 ;;
+        *)   return 2 ;;
+    esac
+}
+
+profile_exists() {
+    [[ -d "$PROFILES_DIR/$1" ]] || die "Profile '$1' not found."
+}
+
+# Extract a JSON string value using sed (no python3 dependency).
+# Usage: json_val file key
+json_val() {
+    sed -n 's/.*"'"$2"'"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$1" 2>/dev/null | head -1
+}
+
+# Check if a JSON boolean key is true.
+json_bool() {
+    grep -q "\"$2\"[[:space:]]*:[[:space:]]*true" "$1" 2>/dev/null
+}
+
+# Write a minimal .claude.json so Claude Code skips onboarding when using
+# an API key. Without this flag Claude forces interactive onboarding even
+# with ANTHROPIC_API_KEY set. See: github.com/anthropics/claude-code/issues/4714
+seed_config() {
+    local cj="$PROFILES_DIR/$1/.claude.json"
+    if [[ -f "$cj" ]]; then
+        if ! json_bool "$cj" "hasCompletedOnboarding"; then
+            # Add the flag to existing config
+            local tmp
+            tmp=$(sed 's/^{/{\"hasCompletedOnboarding\":true,\"lastOnboardingVersion\":\"2.1.0\",/' "$cj")
+            printf '%s' "$tmp" > "$cj"
+        fi
+    else
+        printf '{"hasCompletedOnboarding":true,"lastOnboardingVersion":"2.1.0"}\n' > "$cj"
+    fi
+    chmod 600 "$cj"
+}
+
+# Get display info for a profile
+get_status() {
+    local name="$1"
+
+    if has_key "$name"; then
+        local key masked
+        key="$(read_key "$name")"
+        if [[ ${#key} -gt 14 ]]; then
+            masked="${key:0:10}...${key: -4}"
+        else
+            masked="***"
+        fi
+        echo -e "${G}api-key${N} ${D}$masked${N}"
+        return
+    fi
+
+    local cj="$PROFILES_DIR/$name/.claude.json"
+    if [[ -f "$cj" ]]; then
+        local display org email
+        display="$(json_val "$cj" "displayName")"
+        org="$(json_val "$cj" "organizationName")"
+        email="$(json_val "$cj" "emailAddress")"
+        if [[ -n "$display" ]]; then
+            local label="$display"
+            [[ -n "$org" ]] && label="$label ($org)"
+            [[ -n "$email" ]] && label="$label <$email>"
+            echo -e "${G}oauth${N} $label"
+            return
+        fi
+    fi
+
+    echo -e "${D}not configured${N}"
+}
+
+# List profile names (used by completions and internally)
+list_profiles() {
+    ensure_dir
+    for d in "$PROFILES_DIR"/*/; do
+        [[ -d "$d" ]] || continue
+        basename "$d"
+    done
+}
+
+# ─── Commands ───────────────────────────────────────────────────────────────────
+
+cmd_list() {
+    ensure_dir
+    local found=0
+    for d in "$PROFILES_DIR"/*/; do
+        [[ -d "$d" ]] || continue
+        local name
+        name="$(basename "$d")"
+        found=1
+        info "  ${B}$name${N} — $(get_status "$name")"
+    done
+
+    if [[ "$found" -eq 0 ]]; then
+        info "${D}No profiles yet.${N}"
+        info "Create one: ${C}cw add <name>${N}"
+    fi
+}
+
+cmd_add() {
+    local name="${1:-}"
+    [[ -n "$name" ]] || die "Usage: cw add <name>"
+    [[ ! -d "$PROFILES_DIR/$name" ]] || die "Profile '$name' already exists."
+
+    ensure_dir
+    mkdir -p "$PROFILES_DIR/$name"
+
+    info "${G}Profile '$name' created.${N}"
+    echo ""
+    info "Next steps:"
+    info "  ${C}cw login $name${N}     Set up authentication"
+}
+
+cmd_remove() {
+    local name="${1:-}"
+    [[ -n "$name" ]] || die "Usage: cw remove <name>"
+    profile_exists "$name"
+
+    info "${Y}Delete profile '$name'? This removes all config for this profile.${N}"
+    read -rp "Type 'yes' to confirm: " confirm
+    [[ "$confirm" == "yes" ]] || { echo "Cancelled."; exit 0; }
+
+    rm -rf "${PROFILES_DIR:?}/$name"
+    info "${G}Deleted.${N}"
+}
+
+cmd_login() {
+    local name="${1:-}"
+    [[ -n "$name" ]] || die "Usage: cw login <name>"
+    profile_exists "$name"
+
+    local cj="$PROFILES_DIR/$name/.claude.json"
+
+    # Already configured — show status and ask
+    if has_key "$name"; then
+        local key masked
+        key="$(read_key "$name")"
+        if [[ ${#key} -gt 14 ]]; then
+            masked="${key:0:10}...${key: -4}"
+        else
+            masked="***"
+        fi
+        info "Profile ${B}$name${N} has an API key (${D}$masked${N})."
+        echo ""
+        info "  ${C}1)${N} Update API key"
+        info "  ${C}2)${N} Switch to Claude Code login"
+        info "  ${C}3)${N} Cancel"
+        echo ""
+        read -rp "Choice [1-3]: " choice
+        case "$choice" in
+            1) cmd_set_key "$name"; return ;;
+            2) rm -f "$PROFILES_DIR/$name/$KEYFILE" ;;
+            *) return ;;
+        esac
+    elif [[ -f "$cj" ]] && [[ -n "$(json_val "$cj" "displayName")" ]]; then
+        local display
+        display="$(json_val "$cj" "displayName")"
+        info "Profile ${B}$name${N} is logged in as ${G}$display${N}."
+        read -rp "Re-login? [y/N] " relogin
+        [[ "${relogin,,}" == "y" ]] || return
+        clear_oauth "$name"
+    else
+        info "How do you want to authenticate profile ${B}$name${N}?"
+        echo ""
+        info "  ${C}1)${N} Claude Code login"
+        info "  ${C}2)${N} API key"
+        echo ""
+        read -rp "Choice [1-2]: " choice
+        case "$choice" in
+            2) cmd_set_key "$name"; return ;;
+        esac
+    fi
+
+    info "Opening Claude Code login for profile ${B}$name${N}..."
+    echo ""
+    unset ANTHROPIC_API_KEY
+    CLAUDE_CONFIG_DIR="$PROFILES_DIR/$name" exec claude
+}
+
+cmd_set_key() {
+    local name="${1:-}"
+    [[ -n "$name" ]] || die "Usage: cw set-key <name>"
+    profile_exists "$name"
+
+    read -rp "Open console.anthropic.com/settings/keys in your browser? [Y/n] " open_browser
+    if [[ "${open_browser,,}" != "n" ]]; then
+        open_url "https://console.anthropic.com/settings/keys"
+    fi
+
+    echo ""
+    info "Paste your API key (sk-ant-...):"
+    read -rsp "> " key
+    echo ""
+    [[ -n "$key" ]] || die "No key provided."
+
+    printf '%s' "$key" > "$PROFILES_DIR/$name/$KEYFILE"
+    chmod 600 "$PROFILES_DIR/$name/$KEYFILE"
+    seed_config "$name"
+    info "${G}API key saved for '$name'.${N}"
+
+    printf "Verifying... "
+    local rc=0
+    validate_key "$key" || rc=$?
+    if [[ $rc -eq 0 ]]; then
+        echo -e "${G}✓ API key is valid.${N}"
+    elif [[ $rc -eq 1 ]]; then
+        echo -e "${Y}✗ API key could not be verified (HTTP 401). Key saved anyway.${N}"
+    else
+        echo -e "${Y}✗ Could not reach API. Key saved anyway.${N}"
+    fi
+}
+
+cmd_use() {
+    local name="${1:-}"
+
+    if [[ -z "$name" ]]; then
+        ensure_dir
+        local profiles=()
+        while IFS= read -r p; do
+            profiles+=("$p")
+        done < <(list_profiles)
+
+        [[ ${#profiles[@]} -gt 0 ]] || die "No profiles. Create one: cw add <name>"
+
+        info "${B}Select profile:${N}"
+        echo ""
+        local i=1
+        for p in "${profiles[@]}"; do
+            info "  ${C}$i)${N} $p — $(get_status "$p")"
+            ((i++))
+        done
+        echo ""
+        read -rp "Choice [1-${#profiles[@]}]: " idx
+
+        if ! [[ "$idx" =~ ^[0-9]+$ ]] || [[ "$idx" -lt 1 || "$idx" -gt ${#profiles[@]} ]]; then
+            die "Invalid choice."
+        fi
+        name="${profiles[$((idx-1))]}"
+    else
+        shift
+    fi
+
+    profile_exists "$name"
+
+    info "${G}Starting Claude Code with profile '$name'...${N}"
+    echo ""
+
+    export CLAUDE_CONFIG_DIR="$PROFILES_DIR/$name"
+
+    if has_key "$name"; then
+        export ANTHROPIC_API_KEY
+        ANTHROPIC_API_KEY="$(read_key "$name")"
+    fi
+
+    exec claude "$@"
+}
+
+cmd_alias() {
+    ensure_dir
+    local found=0
+    echo "# cw — Claude Code workspace aliases"
+    echo "# Add to ~/.zshrc or ~/.bashrc"
+    for d in "$PROFILES_DIR"/*/; do
+        [[ -d "$d" ]] || continue
+        local name
+        name="$(basename "$d")"
+        found=1
+        if has_key "$name"; then
+            echo "alias claude-${name}='CLAUDE_CONFIG_DIR=\"$PROFILES_DIR/$name\" ANTHROPIC_API_KEY=\"\$(tr -d \"\\n\\r\" < \"$PROFILES_DIR/$name/$KEYFILE\")\" claude'"
+        else
+            echo "alias claude-${name}='CLAUDE_CONFIG_DIR=\"$PROFILES_DIR/$name\" claude'"
+        fi
+    done
+
+    if [[ "$found" -eq 0 ]]; then
+        echo "# No profiles yet — run: cw add <name>"
+    else
+        echo ""
+        info "${D}Then run: source ~/.zshrc${N}"
+    fi
+}
+
+cmd_completions() {
+    list_profiles
+}
+
+cmd_help() {
+    cat <<EOF
+$(echo -e "${B}cw${N} v${CW_VERSION} — Claude Code workspace switcher")
+
+$(echo -e "${B}Usage:${N}")
+  cw <command> [args]
+
+$(echo -e "${B}Commands:${N}")
+  list               Show all profiles and their status
+  add <name>         Create a new profile
+  remove <name>      Delete a profile and its config
+  login <name>       Log in or re-configure authentication
+  set-key <name>     Set or update an API key
+  use [name]         Start Claude Code with a profile (interactive if no name)
+  alias              Print shell aliases for direct access
+
+$(echo -e "${B}Examples:${N}")
+  cw add work                  # Create a new profile
+  cw login work                # Log in via Claude Code's auth picker
+  cw use work                  # Start Claude Code with profile
+  cw use                       # Interactive profile picker
+
+$(echo -e "${B}How it works:${N}")
+  Each profile is an isolated Claude Code config directory.
+  OAuth profiles log in via browser. API key profiles use a
+  key from a specific Console workspace.
+
+  Profiles are stored in: $PROFILES_DIR/
+EOF
+}
+
+# ─── Main ───────────────────────────────────────────────────────────────────────
+
+[[ $# -gt 0 ]] || { cmd_help; exit 0; }
+
+cmd="$1"
+shift
+
+case "$cmd" in
+    list|ls)              cmd_list "$@" ;;
+    add)                  cmd_add "$@" ;;
+    remove|rm)            cmd_remove "$@" ;;
+    login)                cmd_login "$@" ;;
+    set-key|key)          cmd_set_key "$@" ;;
+    use|start)            cmd_use "$@" ;;
+    alias|aliases)        cmd_alias "$@" ;;
+    --completions)        cmd_completions ;;
+    help|--help|-h)       cmd_help ;;
+    --version|-v|-V)      echo "cw $CW_VERSION" ;;
+    *)                    die "Unknown command: $cmd. Run 'cw help' for usage." ;;
+esac
